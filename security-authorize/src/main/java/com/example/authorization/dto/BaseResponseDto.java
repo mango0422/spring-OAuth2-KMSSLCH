@@ -1,4 +1,4 @@
-package com.example.authorize.dto;
+package com.example.authorization.dto;
 
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -8,7 +8,6 @@ import lombok.Setter;
 @Setter
 @AllArgsConstructor
 public class BaseResponseDto<T> {
-    private ResponseStatus status;
-    private String message;
+    private ApiResponseStatus status;
     private T data;
 }

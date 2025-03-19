@@ -1,4 +1,4 @@
-package com.example.authorize.model.entity;
+package com.example.authorization.model.entity;
 
 import jakarta.persistence.*;
 import lombok.Getter;

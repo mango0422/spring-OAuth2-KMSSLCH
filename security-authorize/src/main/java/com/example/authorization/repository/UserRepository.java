@@ -1,8 +1,8 @@
-package com.example.authorize.repository;
+package com.example.authorization.repository;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 
-import com.example.authorize.model.entity.User;
+import com.example.authorization.model.entity.User;
 
 import java.util.Optional;
 

@@ -1,4 +1,4 @@
-package com.example.authorize.dto;
+package com.example.authorization.dto;
 
 public enum ResponseStatus {
     SUCCESS,
