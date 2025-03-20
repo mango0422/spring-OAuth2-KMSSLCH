@@ -1,0 +1,549 @@
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\SecurityAuthorizeApplication.java
+package com.example.authorization;
+
+import com.example.authorization.entity.Authority;
+import com.example.authorization.entity.User;
+import com.example.authorization.repository.AuthorityRepository;
+import com.example.authorization.repository.UserRepository;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.security.crypto.password.PasswordEncoder;
+
+import java.util.Set;
+
+@SpringBootApplication
+public class SecurityAuthorizeApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(SecurityAuthorizeApplication.class, args);
+	}
+
+	@Bean
+	public CommandLineRunner dataLoader(
+			UserRepository userRepository,
+			AuthorityRepository authorityRepository,
+			PasswordEncoder passwordEncoder) {
+		return args -> {
+
+			if (userRepository.findByUsername("admin").isPresent() ||
+					userRepository.findByUsername("user").isPresent()) {
+				return; // 이미 데이터가 있으면 실행하지 않음
+			}
+
+			// 권한 생성 및 저장
+			Authority userRole = authorityRepository.findByAuthorityName("ROLE_USER")
+					.orElseGet(() -> authorityRepository.save(Authority.builder().authorityName("ROLE_USER").build()));
+
+			Authority adminRole = authorityRepository.findByAuthorityName("ROLE_ADMIN")
+					.orElseGet(() -> authorityRepository.save(Authority.builder().authorityName("ROLE_ADMIN").build()));
+
+
+			// 사용자 생성 및 저장
+			User admin = User.builder()
+					.username("admin")
+					.password(passwordEncoder.encode("admin"))
+					.nickname("Administrator")
+					.activated(true)
+					.authorities(Set.of(adminRole, userRole))
+					.build();
+			userRepository.save(admin);
+
+			User user = User.builder()
+					.username("user")
+					.password(passwordEncoder.encode("user"))
+					.nickname("Regular User")
+					.activated(true)
+					.authorities(Set.of(userRole))
+					.build();
+			userRepository.save(user);
+
+
+		};
+	}
+
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\config\AuthorizationServerConfig.java
+    package com.example.authorization.config;
+
+    import com.fasterxml.jackson.databind.ObjectMapper;
+    import com.nimbusds.jose.jwk.RSAKey;
+    import com.nimbusds.jose.jwk.JWKSet;
+    import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
+    import org.springframework.context.annotation.Bean;
+    import org.springframework.context.annotation.Configuration;
+    import org.springframework.core.Ordered;
+    import org.springframework.core.annotation.Order;
+    import org.springframework.security.config.Customizer;
+    import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+    import org.springframework.security.config.annotation.web.configurers.RequestCacheConfigurer;
+    import org.springframework.security.core.Authentication;
+    import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
+    import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+    import org.springframework.security.oauth2.server.authorization.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
+    import org.springframework.security.web.SecurityFilterChain;
+
+    import jakarta.servlet.http.HttpServletRequest;
+    import jakarta.servlet.http.HttpServletResponse;
+    import org.springframework.security.web.savedrequest.HttpSessionRequestCache;
+
+    import java.security.KeyPair;
+    import java.security.KeyPairGenerator;
+    import java.security.interfaces.RSAPrivateKey;
+    import java.security.interfaces.RSAPublicKey;
+    import java.util.List;
+    import java.util.Map;
+    import java.util.UUID;
+
+    @Configuration
+    public class AuthorizationServerConfig {
+
+        @Bean
+        public KeyPair rsaKeyPair() {
+            try {
+                KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("RSA");
+                keyPairGenerator.initialize(2048);
+                return keyPairGenerator.generateKeyPair();
+            } catch(Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
+        @Bean
+        public ImmutableJWKSet jwkSource(KeyPair rsaKeyPair) {
+            RSAKey rsaKey = new RSAKey.Builder((RSAPublicKey) rsaKeyPair.getPublic())
+                    .privateKey((RSAPrivateKey) rsaKeyPair.getPrivate())
+                    .keyID(UUID.randomUUID().toString())
+                    .build();
+            JWKSet jwkSet = new JWKSet(rsaKey);
+            return new ImmutableJWKSet(jwkSet);
+        }
+
+        @Bean
+        @Order(Ordered.HIGHEST_PRECEDENCE)
+        public SecurityFilterChain authorizationServerSecurityFilterChain(HttpSecurity http,
+                                                                          RegisteredClientRepository registeredClientRepository) throws Exception {
+            OAuth2AuthorizationServerConfiguration.applyDefaultSecurity(http);
+
+            // RequestCache 비활성화 (저장된 요청이 남지 않도록 함)
+            http.requestCache(RequestCacheConfigurer::disable);
+
+            http.formLogin(form -> form
+                    .loginPage("/login")
+                    .loginProcessingUrl("/login")
+                    .successHandler((HttpServletRequest request, HttpServletResponse response, Authentication authentication) -> {
+                        // 클라이언트 ID를 요청 파라미터에서 읽어옴
+                        String clientId = request.getParameter("client_id");
+                        String redirectUri = null;
+                        if (clientId != null && !clientId.isBlank()) {
+                            RegisteredClient client = registeredClientRepository.findByClientId(clientId);
+                            if (client != null) {
+                                try {
+                                    String clientSettingsJson = client.getClientSettings().toString();
+                                    ObjectMapper mapper = new ObjectMapper();
+                                    Map settings = mapper.readValue(clientSettingsJson, Map.class);
+                                    List<String> uris = (List<String>) settings.get("redirect_uris");
+                                    if (uris != null && !uris.isEmpty()) {
+                                        redirectUri = uris.get(0);
+                                    }
+                                } catch (Exception e) {
+                                    e.printStackTrace();
+                                }
+                            }
+                        }
+                        if (redirectUri == null || redirectUri.isBlank()) {
+                            redirectUri = request.getParameter("redirect_uri");
+                        }
+                        if (redirectUri == null || redirectUri.isBlank()) {
+                            redirectUri = request.getParameter("continue");
+                        }
+                        if (redirectUri == null || redirectUri.isBlank()) {
+                            redirectUri = "http://localhost:3000";
+                        }
+                        response.sendRedirect(redirectUri);
+                    })
+                    .failureUrl("/login?error")
+                    .permitAll());
+
+            return http.build();
+        }
+
+    }
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\config\SecurityConfig.java
+package com.example.authorization.config;
+
+import com.example.authorization.service.CustomUserDetailsService;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.config.annotation.web.configurers.HeadersConfigurer;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Configuration
+public class SecurityConfig {
+
+    private final CustomUserDetailsService customUserDetailsService;
+
+    public SecurityConfig(CustomUserDetailsService customUserDetailsService) {
+        this.customUserDetailsService = customUserDetailsService;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public DaoAuthenticationProvider daoAuthenticationProvider() {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+        provider.setUserDetailsService(customUserDetailsService);
+        provider.setPasswordEncoder(passwordEncoder());
+        return provider;
+    }
+
+    @Bean
+    public SecurityFilterChain defaultSecurityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .csrf(AbstractHttpConfigurer::disable)
+                .headers(headers -> headers.frameOptions(HeadersConfigurer.FrameOptionsConfig::sameOrigin))
+                .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+                .formLogin(Customizer.withDefaults()); // 기본 로그인 폼 사용
+        return http.build();
+    }
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\converter\RegisteredClientConverter.java
+package com.example.authorization.converter;
+
+import com.example.authorization.dto.RegisteredClientDTO;
+import com.example.authorization.entity.RegisteredClientEntity;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
+import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
+import org.springframework.security.oauth2.server.authorization.settings.TokenSettings;
+
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+public final class RegisteredClientConverter {
+
+    // 인스턴스 생성 방지
+    private RegisteredClientConverter() {}
+
+    // 엔티티 -> DTO (record)
+    public static RegisteredClientDTO convertToDto(RegisteredClientEntity entity) {
+        return new RegisteredClientDTO(
+                entity.getId(),
+                entity.getClientId(),
+                entity.getClientSecret(),
+                entity.getScopes(),
+                entity.getClientSettings(),
+                entity.getTokenSettings()
+        );
+    }
+
+    // DTO (record) -> 엔티티
+    public static RegisteredClientEntity convertToEntity(RegisteredClientDTO dto) {
+        return RegisteredClientEntity.builder()
+                .id(dto.id())
+                .clientId(dto.clientId())
+                .clientSecret(dto.clientSecret())
+                .scopes(dto.scopes())
+                .clientSettings(dto.clientSettings())
+                .tokenSettings(dto.tokenSettings())
+                .build();
+    }
+
+    // Spring RegisteredClient -> DTO (record)
+    public static RegisteredClientDTO convertToDto(RegisteredClient client) {
+        String scopes = String.join(",", client.getScopes());
+        return new RegisteredClientDTO(
+                client.getId(),
+                client.getClientId(),
+                client.getClientSecret(),
+                scopes,
+                "{}", // clientSettings – 단순 예제로 "{}" 사용
+                "{}"  // tokenSettings – 단순 예제로 "{}" 사용
+        );
+    }
+
+    // DTO (record) -> Spring RegisteredClient
+    public static RegisteredClient convertToRegisteredClient(RegisteredClientDTO dto) {
+        // 스코프 문자열을 ','로 분리하고 trim 처리하여 Set으로 변환
+        Set<String> scopes = Arrays.stream(dto.scopes().split(","))
+                .map(String::trim)
+                .collect(Collectors.toSet());
+
+        return RegisteredClient.withId(dto.id())
+                .clientId(dto.clientId())
+                .clientSecret(dto.clientSecret())
+                // 예제로 client_credentials와 refresh_token을 사용
+                .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+                .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
+                .scopes(set -> set.addAll(scopes))
+                .clientSettings(ClientSettings.builder().build())
+                .tokenSettings(TokenSettings.builder().build())
+                .build();
+    }
+}
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\dto\Account.java
+package com.example.authorization.dto;
+
+public record Account() {
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\dto\RegisteredClientDTO.java
+package com.example.authorization.dto;
+
+public record RegisteredClientDTO(
+        String id,
+        String clientId,
+        String clientSecret,
+        String scopes,
+        String clientSettings,
+        String tokenSettings
+) {}
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\entity\Authority.java
+package com.example.authorization.entity;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+@Entity
+@Table(name = "authority")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@ToString
+public class Authority {
+    @Id
+    @Column(name = "authority_name", length = 50)
+    private String authorityName;
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\entity\RegisteredClientEntity.java
+package com.example.authorization.entity;
+
+import jakarta.persistence.*;
+import lombok.Builder;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.ToString;
+
+@Entity
+@Table(name = "oauth_registered_client")
+@Getter
+@ToString
+@NoArgsConstructor
+public class RegisteredClientEntity {
+
+    @Id
+    private String id; // UUID
+
+    @Column(name="client_id", nullable = false, unique = true)
+    private String clientId;
+
+    @Column(name="client_secret", nullable = false)
+    private String clientSecret;
+
+    // 콤마(,)로 구분된 스코프 목록
+    @Column(name="scopes")
+    private String scopes;
+
+    // JSON 직렬화된 clientSettings, tokenSettings (간단히 "{}" 사용)
+    @Lob
+    @Column(name="client_settings")
+    private String clientSettings;
+
+    @Lob
+    @Column(name="token_settings")
+    private String tokenSettings;
+
+    @Builder
+    public RegisteredClientEntity(String id, String clientId, String clientSecret, String scopes, String clientSettings, String tokenSettings) {
+        this.id = id;
+        this.clientId = clientId;
+        this.clientSecret = clientSecret;
+        this.scopes = scopes;
+        this.clientSettings = clientSettings;
+        this.tokenSettings = tokenSettings;
+    }
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\entity\User.java
+package com.example.authorization.entity;
+
+import jakarta.persistence.*;
+import lombok.*;
+
+import java.util.Set;
+
+@Entity
+@Table(name = "users")
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+@ToString
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(unique = true, nullable = false, length = 50)
+    private String username;
+
+    @Column(nullable = false, length = 100)
+    private String password;
+
+    // 사용자의 표시명을 위한 컬럼 (권한 정보는 따로 관리)
+    @Column(length = 50)
+    private String nickname;
+
+    @Column(nullable = false)
+    private Boolean activated;
+
+    // 사용자와 권한의 매핑 (EAGER 로 로딩하여 로그인 시점에 모든 권한을 가져옴)
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(
+            name = "user_authority",
+            joinColumns = @JoinColumn(name = "user_id"),
+            inverseJoinColumns = @JoinColumn(name = "authority_name")
+    )
+    private Set<Authority> authorities;
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\repository\AuthorityRepository.java
+// AuthorityRepository.java  (추가)
+package com.example.authorization.repository;
+
+import com.example.authorization.entity.Authority;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface AuthorityRepository extends JpaRepository<Authority, String> {
+    Optional<Authority> findByAuthorityName(String authorityName);
+}
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\repository\JpaRegisteredClientRepository.java
+package com.example.authorization.repository;
+
+import com.example.authorization.converter.RegisteredClientConverter;
+import com.example.authorization.dto.RegisteredClientDTO;
+import com.example.authorization.entity.RegisteredClientEntity;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+import org.springframework.stereotype.Component;
+
+import java.util.Optional;
+
+@Component
+public class JpaRegisteredClientRepository implements RegisteredClientRepository {
+
+    private final RegisteredClientEntityRepository entityRepository;
+
+    public JpaRegisteredClientRepository(RegisteredClientEntityRepository entityRepository) {
+        this.entityRepository = entityRepository;
+    }
+
+    @Override
+    public void save(RegisteredClient registeredClient) {
+        RegisteredClientDTO dto = RegisteredClientConverter.convertToDto(registeredClient);
+        RegisteredClientEntity entity = RegisteredClientConverter.convertToEntity(dto);
+        entityRepository.save(entity);
+    }
+
+    @Override
+    public RegisteredClient findById(String id) {
+        Optional<RegisteredClientEntity> entityOpt = entityRepository.findById(id);
+        return entityOpt.map(entity -> RegisteredClientConverter.convertToRegisteredClient(RegisteredClientConverter.convertToDto(entity))).orElse(null);
+    }
+
+    @Override
+    public RegisteredClient findByClientId(String clientId) {
+        Optional<RegisteredClientEntity> entityOpt = entityRepository.findByClientId(clientId);
+        return entityOpt.map(entity -> RegisteredClientConverter.convertToRegisteredClient(RegisteredClientConverter.convertToDto(entity))).orElse(null);
+    }
+}
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\repository\RegisteredClientEntityRepository.java
+package com.example.authorization.repository;
+
+import com.example.authorization.entity.RegisteredClientEntity;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface RegisteredClientEntityRepository extends JpaRepository<RegisteredClientEntity, String> {
+    Optional<RegisteredClientEntity> findByClientId(String clientId);
+}
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\repository\UserRepository.java
+package com.example.authorization.repository;
+
+import com.example.authorization.entity.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByUsername(String username);
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorization\service\CustomUserDetailsService.java
+package com.example.authorization.service;
+
+import com.example.authorization.entity.User;
+import com.example.authorization.repository.UserRepository;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.userdetails.*;
+import org.springframework.stereotype.Service;
+
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor
+public class CustomUserDetailsService implements UserDetailsService {
+
+    private final UserRepository userRepository;
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new UsernameNotFoundException("User not found: " + username));
+
+        return new org.springframework.security.core.userdetails.User(
+                user.getUsername(),
+                user.getPassword(),
+                user.getAuthorities().stream()
+                        .map(auth -> new SimpleGrantedAuthority(auth.getAuthorityName()))
+                        .collect(Collectors.toList())
+        );
+    }
+}
+
+
