@@ -1,0 +1,221 @@
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorize\SecurityAuthorizeApplication.java
+package com.example.authorize;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class SecurityAuthorizeApplication {
+
+	public static void main(String[] args) {
+		SpringApplication.run(SecurityAuthorizeApplication.class, args);
+	}
+
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorize\config\OAuth2ServerConfig.java
+package com.example.authorize.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
+import org.springframework.security.oauth2.core.oidc.OidcScopes;
+import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.client.JdbcRegisteredClientRepository;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
+
+import javax.sql.DataSource;
+import java.util.UUID;
+
+@Configuration
+public class OAuth2ServerConfig {
+
+    // ✅ 1. Jdbc 기반 클라이언트 저장소 설정 (Spring Bean으로 등록)
+    @Bean
+    public RegisteredClientRepository registeredClientRepository(DataSource dataSource) {
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        JdbcRegisteredClientRepository repository = new JdbcRegisteredClientRepository(jdbcTemplate);
+
+        // ✅ 기존 클라이언트가 존재하는지 확인 후 저장
+        RegisteredClient existingClient = repository.findByClientId("oauth2-client-app");
+        if (existingClient == null) {
+            RegisteredClient registeredClient = RegisteredClient.withId(UUID.randomUUID().toString())
+                    .clientId("oauth2-client-app")
+                    .clientSecret("{noop}secret")
+                    .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
+                    .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
+                    .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
+                    .redirectUri("http://localhost:3000/callback")
+                    .scope("read")
+                    .scope("write")
+                    .clientSettings(ClientSettings.builder()
+                            .requireAuthorizationConsent(true)  // ✅ 동의(Consent) 페이지 활성화
+                            .build())
+                    .build();
+
+            try {
+                repository.save(registeredClient);
+                System.out.println("✅ 클라이언트 저장 성공: oauth2-client-app");
+            } catch (Exception e) {
+                System.err.println("❌ 클라이언트 저장 실패: " + e.getMessage());
+            }
+        } else {
+            System.out.println("ℹ️ 클라이언트가 이미 존재함: oauth2-client-app");
+        }
+
+        return repository;
+    }
+
+    // ✅ 2. 인가 코드 및 토큰을 DB에서 관리하는 서비스 등록
+    @Bean
+    public OAuth2AuthorizationService authorizationService(DataSource dataSource, RegisteredClientRepository registeredClientRepository) {
+        JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
+        return new JdbcOAuth2AuthorizationService(jdbcTemplate, registeredClientRepository);
+    }
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorize\config\SecurityConfig.java
+package com.example.authorize.config;
+
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.MediaType;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configurers.oauth2.server.resource.OAuth2ResourceServerConfigurer;
+import org.springframework.security.oauth2.server.authorization.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
+import org.springframework.security.oauth2.server.authorization.config.annotation.web.configurers.OAuth2AuthorizationServerConfigurer;
+import org.springframework.security.oauth2.server.authorization.settings.AuthorizationServerSettings;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
+import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
+
+@Configuration
+public class SecurityConfig {
+
+
+    // ✅ 1. OAuth2 인가 서버 보안 필터 체인
+    @Bean
+    @Order(Ordered.HIGHEST_PRECEDENCE)
+    public SecurityFilterChain authorizationServerSecurityFilterChain(HttpSecurity http) throws Exception {
+        OAuth2AuthorizationServerConfiguration.applyDefaultSecurity(http);
+        http.getConfigurer(OAuth2AuthorizationServerConfigurer.class)
+                .oidc(Customizer.withDefaults());  // OpenID Connect 지원
+
+
+        // 인증되지 않은 사용자는 /login 페이지로 이동
+        http.exceptionHandling(exceptions -> exceptions.defaultAuthenticationEntryPointFor(
+                new LoginUrlAuthenticationEntryPoint("/login"),
+                new MediaTypeRequestMatcher(MediaType.TEXT_HTML)
+        ));
+
+        // JWT 토큰 검증 활성화
+        http.oauth2ResourceServer(OAuth2ResourceServerConfigurer::jwt);
+
+        return http.build();
+    }
+
+    // ✅ 2. 기본 로그인 폼 활성화
+    @Bean
+    @Order(Ordered.LOWEST_PRECEDENCE)
+    public SecurityFilterChain defaultSecurityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/oauth2/authorize").authenticated()
+                        .anyRequest().permitAll()
+                )
+                .formLogin(Customizer.withDefaults())  // Spring Security 기본 로그인 폼 사용
+                .logout(Customizer.withDefaults());  // 로그아웃 지원
+
+        return http.build();
+    }
+
+    // ✅ 3. OAuth2 Authorization Server 설정
+    @Bean
+    public AuthorizationServerSettings authorizationServerSettings() {
+        return AuthorizationServerSettings.builder()
+                .issuer("http://localhost:9000")  // OAuth2 인가 서버 URL
+                .build();
+    }
+
+}
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorize\config\UserConfig.java
+package com.example.authorize.config;
+
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+
+@Configuration
+public class UserConfig {
+    PasswordEncoder encoder = PasswordEncoderFactories.createDelegatingPasswordEncoder();
+    @Bean
+    public UserDetailsService userDetailsService() {
+        UserDetails user = User.withUsername("user")
+                .password(encoder.encode("1234"))
+                .roles("USER")
+                .build();
+        return new InMemoryUserDetailsManager(user);
+    }
+}
+
+
+C:\woori-workspace\lecture\15. Spring Security\OAuth_example\security-authorize\src\main\java\com\example\authorize\controller\ClientController.java
+package com.example.authorize.controller;
+
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.oauth2.core.AuthorizationGrantType;
+import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/clients")
+@RequiredArgsConstructor
+public class ClientController {
+
+    private final RegisteredClientRepository registeredClientRepository;
+
+    @PostMapping("/register")
+    public String registerClient(@RequestParam String clientId, @RequestParam String clientSecret) {
+        RegisteredClient registeredClient = RegisteredClient.withId(UUID.randomUUID().toString())
+                .clientId(clientId)
+                .clientSecret("{noop}" + clientSecret) // 테스트용
+                .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
+                .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
+                .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
+                .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
+                .redirectUri("http://localhost:3000/callback")
+                .scope("read")
+                .scope("write")
+                .build();
+
+        registeredClientRepository.save(registeredClient);
+        return "Client registered successfully: " + clientId;
+    }
+}
+

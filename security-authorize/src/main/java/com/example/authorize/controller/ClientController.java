@@ -1,6 +1,5 @@
 package com.example.authorize.controller;
 
-
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.oauth2.core.AuthorizationGrantType;
 import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
@@ -24,14 +23,16 @@ public class ClientController {
     public String registerClient(@RequestParam String clientId, @RequestParam String clientSecret) {
         RegisteredClient registeredClient = RegisteredClient.withId(UUID.randomUUID().toString())
                 .clientId(clientId)
-                .clientSecret("{noop}" + clientSecret) // 테스트용
+                .clientSecret("{noop}" + clientSecret) // 테스트용, 운영 시 암호화 필요
                 .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
                 .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
                 .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
                 .authorizationGrantType(AuthorizationGrantType.CLIENT_CREDENTIALS)
-                .redirectUri("http://127.0.0.1:8081/callback")
+                // OIDC 지원을 위한 openid 스코프 추가
+                .scope("openid")
                 .scope("read")
                 .scope("write")
+                .redirectUri("http://localhost:3000/callback")
                 .build();
 
         registeredClientRepository.save(registeredClient);
